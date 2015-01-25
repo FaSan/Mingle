@@ -20,6 +20,7 @@ ad_mkdir() {
     local _dir=$1
 
     if [ ! -e $_dir ]; then
+        mingleLog "Creating directory $_dir..." true
         mkdir -p $_dir || mingleError $? "mkdir failed for $_dir, aborting!"
     fi
 }
@@ -63,6 +64,9 @@ ad_cwd() {
     echo $_curDir
 }
 
+#
+# Ex: if ad_isDateNewerThanFileModTime "2013-01-01" "/mingw/bin/tar.exe"; then
+#
 ad_isDateNewerThanFileModTime() {
     local _checkdate=$1
     local _filename=$2
@@ -73,16 +77,36 @@ ad_isDateNewerThanFileModTime() {
 
     local _chkdtseconds=`date -d "$_checkdate" +%s`
 
-    local _getfiledate=`stat -c %y $_filename|sed 's/ .*//'`
+    local _getfiledate=`stat -c %y $_filename|sed 's/\..*//'`
     local _cnvrtfieldate=`date -d "$_getfiledate" +%s`
 
-    echo "comparing provided date ($_checkdate, $_chkdtseconds), with filedate ($_getfiledate, $_cnvrtfieldate)."
+    mingleLog
+    mingleLog "comparing provided date ($_checkdate, $_chkdtseconds), with filedate ($_getfiledate, $_cnvrtfieldate) for $_filename."
 
     if [ "$_chkdtseconds" -gt "$_cnvrtfieldate" ]; then
         return 0
     fi
 
     return 1
+}
+
+ad_hasFileRecentlyChanged() {
+    local _filename=$1
+    #local _getfiledate=`stat -c %y $_filename|sed 's/\..*//'`
+    #local _checkdate=`date "+%Y-%m-%d %T"`
+    
+    local _getfiledate=`stat -c %Y $_filename`
+    local _checkdate=`date +%s`
+    local _result=`expr $_checkdate - $_getfiledate`
+    
+    mingleLog "Checking last file date ($_getfiledate), with current ($_checkdate), resulting ($_result)."
+    
+    # 60 seconds for now
+    if [ "$_result" -gt "120" ]; then
+        return 1
+    fi
+    
+    return 0
 }
 
 ad_getDirFromLocWC() {
@@ -278,7 +302,7 @@ ad_generateImportLibraryForDLL() {
 ad_clearEnv() {
     mingleLog "Resetting environment flags..." true
 
-    unset PKG_CONFIG_PATH; unset CFLAGS; unset LDFLAGS; unset CPPFLAGS; unset CRYPTO; unset CC; unset CXX; unset LIBS
+    unset PKG_CONFIG_PATH; unset CFLAGS; unset LDFLAGS; unset CXXFLAGS; unset CPPFLAGS; unset CRYPTO; unset CC; unset CXX; unset LIBS
 
     ad_cd $MINGLE_BUILD_DIR
 }
@@ -346,6 +370,7 @@ ad_patch() {
         mingleError -1 "Patching failed! Patch should be ran from project directory."
     fi
 
+    # patches created from diff -uw original.src updated.dest
     patch --ignore-whitespace -f -p1 < $_patchFile
 }
 
@@ -446,7 +471,7 @@ ad_configure() {
     
         mingleLog
         mingleLog "Using CC: $CC"
-    mingleLog "Using CXX: $CXX"
+        mingleLog "Using CXX: $CXX"
         mingleLog "Using CFLAGS: $CFLAGS"
         mingleLog "Using CPPFLAGS: $CPPFLAGS"
         mingleLog "Using CXXFLAGS: $CXXFLAGS"
@@ -454,6 +479,15 @@ ad_configure() {
         mingleLog "Using LIBS: $LIBS"
         mingleLog
         mingleLog "executing: ./configure $_options $_additionFlags" true
+        
+        if [[ $_additionFlags == *"prefix"* ]]
+	then
+	    mingleLog
+	    mingleLog "New prefix found, Removing previous prefix..." false
+	    _options=`echo "$_options "|sed -e "s/[-]*[ext]*prefix.[^ ]* //"`
+	    mingleLog "New _options: $_options" false
+	    mingleLog
+        fi
 
         local _newflags="$_options $_additionFlags"
 
@@ -482,7 +516,7 @@ ad_configure() {
             
             _test="${_test%\.}"
             _test="${_test%\"}"
-        _test="${_test#\"}"
+            _test="${_test#\"}"
 
             if $_configFailed; then
                 cat out.txt
@@ -959,9 +993,9 @@ mingleDownload() {
         mingleLog "Downloading $_url..." true
         
         if echo $_url|grep -i 'https://'; then
-            wget  --no-check-certificate $_url -O $_outputFile || mingleError $? "Download failed for $_file, aborting!"
+            wget  -N --no-check-certificate $_url -O $_outputFile || mingleError $? "Download failed for $_file, aborting!"
         else
-            wget $_url -O $_outputFile || mingleError $? "Download failed for $_file, aborting!"
+            wget -N $_url -O $_outputFile || mingleError $? "Download failed for $_file, aborting!"
         fi
     else
         echo
@@ -1027,7 +1061,7 @@ mingleDecompress() {
             fi
             
             if [ -d "$_targetdircheck" ]; then
-            mingleLog "$_targetdircheck already decompressed. Using..." true
+                mingleLog "$_targetdircheck already decompressed. Using..." true
                 return
             fi
         fi
@@ -1088,6 +1122,20 @@ mingleCategoryDownload() {
   
   mingleLog "Checking ${_projectName} for $_version" true
   
+  if [ -z "$_overidename" ]; then
+      _outputfile=$MINGLE_CACHE/$_projectName/$_version/$_file
+  else
+      mingleLog "Using overide=$_overidename..." true
+      _outputfile=$MINGLE_CACHE/$_projectName/$_version/$_overidename
+  fi
+  
+  if [ -e "$_outputfile" ]; then
+      if ad_hasFileRecentlyChanged $_outputfile; then
+          mingleLog "$_outputfile has recently been downloaded; skipping..." true
+          return
+      fi
+  fi
+  
   if [ ! -e "$MINGLE_CACHE/$_projectName/$_version" ]; then
       ad_mkdir $MINGLE_CACHE/$_projectName/$_version
   elif [ "$_version" == "master" ]; then
@@ -1098,13 +1146,6 @@ mingleCategoryDownload() {
       mingleLog
       ad_rmdir $MINGLE_CACHE/$_projectName/$_version
       ad_mkdir $MINGLE_CACHE/$_projectName/$_version
-  fi
-  
-  if [ -z "$_overidename" ]; then
-      _outputfile=$MINGLE_CACHE/$_projectName/$_version/$_file
-  else
-      mingleLog "Using overide=$_overidename..." true
-      _outputfile=$MINGLE_CACHE/$_projectName/$_version/$_overidename
   fi
   
   mingleDownload $_url $_outputfile
